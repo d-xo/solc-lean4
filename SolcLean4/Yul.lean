@@ -47,52 +47,48 @@ syntax "{" yul_statement* "}" : yul_block
 
 -- Semantics --
 
-syntax "assembly " yul_block : term
+syntax "assembly {" yul_expression "}" : term
 
-instance : Coe (TSyntax `yul_expression) (TSyntax `doElem) where
-  coe s := ⟨s.raw⟩
+instance : Coe Syntax (TSyntax `doElem) where
+  coe s := ⟨s⟩
 
-instance : Coe (TSyntax `yul_expression) (TSyntax `term) where
-  coe s := ⟨s.raw⟩
+instance : Coe Syntax (TSyntax `doElem) where
+  coe s := ⟨s⟩
 
-instance : Coe (TSyntax `yul_expression) (TSyntax `Lean.Parser.Term.doSeqItem) where
-  coe s := ⟨s.raw⟩
+instance : Coe Syntax (TSyntax `term) where
+  coe s := ⟨s⟩
 
-instance : Coe (TSyntax `yul_statement) (TSyntax `Lean.Parser.Term.doSeqItem) where
-  coe s := ⟨s.raw⟩
-
-instance : Coe (TSyntax `ident) (TSyntax `Lean.Parser.Term.doSeqItem) where
-  coe s := ⟨s.raw⟩
-
-instance : Coe (TSyntax `yul_block) (TSyntax `term) where
-  coe s := ⟨s.raw⟩
-
-instance : Coe (TSyntax `yul_literal) (TSyntax `term) where
-  coe s := ⟨s.raw⟩
+instance : Coe Syntax (TSyntax `Lean.Parser.Term.doSeqItem) where
+  coe s := ⟨s⟩
 
 macro_rules
   | `(yul_literal | true) => `(pure Bool.true)
   | `(yul_literal | false) => `(pure Bool.false)
   | `(yul_literal | $n:num) => `(pure $ Word.abs $n)
-  | `(assembly $b:yul_block) => `($b)
-  | `(yul_block | { $[$s:yul_statement]* })
-      => `(do
-            $[$s]*
-          )
+  | `(assembly { $b:yul_expression }) => Lean.expandMacros b
+  --| `(yul_block | { $[$s:yul_statement]* })
+      --=> `(do
+            --$[$s]*
+          --)
   | `(yul_statement | $i:ident := $e:yul_expression)
-      => `(do
-            let e' ← $e
-            $i ":=" e'
-          )
+      => do
+        let ee ← Lean.expandMacros e
+        `($ee >>= (λ e' => $i ":=" e'))
   | `(yul_statement | $e:yul_expression)
-      => `($e >> (pure ()))
-  | `(yul_expression | $l:yul_literal) => `($l)
+      => do
+        let ee ← Lean.expandMacros e
+        `($ee >> (pure ()))
+  | `(yul_expression | $l:yul_literal) => Lean.expandMacros l
   | `(yul_expression | $i:ident($x:yul_expression,$y:yul_expression))
-      => `(do
-            let y' ← $y
-            let x' ← $x
-            yul_$i x' y'
-          )
+      => do
+        let xe ← Lean.expandMacros x
+        let ye ← Lean.expandMacros y
+        `(do
+           let y' ← $ye
+           pure ()
+           --let x' ← $xe
+           --yul_$i x' y'
+         )
 end Yul
 
 -- The type of EVM words --
@@ -123,9 +119,14 @@ abbrev Sol a := Yul a
 def yul_add (a : Word) (b : Word) : Yul Word :=
   pure (Word.abs ((a.rep + b.rep) % (2 ^ 256)))
 
+set_option pp.rawOnError true
+
+--#check assembly { add(10, 11) }
+
 #check do
   let mut (x : Word) := Word.abs 0
-  assembly { add(10, 11) }
+  --x := Word.abs 10
+  assembly { x := 10 }
   pure x
 
 
@@ -133,16 +134,11 @@ namespace Solidity
 
 -- uint256 --
 
-structure U256 where
-  rep : Word
-
-namespace U256
-
-def abs := U256.mk
-
-end U256
 
 -- Addition --
+
+structure U256 where
+  rep : Word
 
 class Add (t : Type) where
   add : t → t → Sol t
@@ -151,9 +147,10 @@ instance : Add U256 where
   add x y := do
     let xw := U256.rep x
     let yw := U256.rep y
-    let mut z := U256
-    -- This block needs to parse a mix of lean4 and yul into pure lean4.
-    assembly { z := U256.abs(add(xw, yw)) }
-    return z
+    let mut zw := Word.mk 0
+    -- This block should expand into:
+    --  z ← add xw yw
+    assembly { z := add(xw, yw) }
+    return U256.mk zw
 
 end Solidity
