@@ -135,10 +135,17 @@ namespace Solidity
 -- uint256 --
 
 
--- Addition --
-
 structure U256 where
   rep : Word
+
+namespace U256
+
+def abs := U256.mk
+
+end U256
+
+
+-- Addition --
 
 class Add (t : Type) where
   add : t → t → Sol t
@@ -147,10 +154,10 @@ instance : Add U256 where
   add x y := do
     let xw := U256.rep x
     let yw := U256.rep y
-    let mut zw := Word.mk 0
+    let mut zw := Word.abs 0
     -- This block should expand into:
     --  z ← add xw yw
-    assembly { z := add(xw, yw) }
-    return U256.mk zw
+    assembly { zw := add(xw, yw) }
+    return U256.abs zw
 
 end Solidity
