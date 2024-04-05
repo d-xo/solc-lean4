@@ -64,29 +64,29 @@ instance : Repr Word where
 
 -- Semantics --
 
-syntax "assembly {" yul_statement "}" : doElem
+syntax "assembly " yul_block : doElem
 
 instance : Coe Syntax (TSyntax `doElem) where
   coe s := ⟨s⟩
 
-instance : Coe Syntax (TSyntax `term) where
-  coe s := ⟨s⟩
+instance : Coe (Array Syntax) (TSyntax `Lean.Parser.Term.doSeq) where
+  coe s := ⟨Elab.Term.Do.mkDoSeq s⟩
 
-instance : Coe Syntax (TSyntax `Lean.Parser.Term.doSeqItem) where
-  coe s := ⟨s⟩
-
-def get_name : (i : TSyntax `ident) → Name
-  | `($i:ident) => match i.raw with
-    | Syntax.ident _ _ nm _ => nm
-    | _ => sorry
-  | _ => sorry
+--def get_name : (i : TSyntax `ident) → Name
+  --| `($i:ident) => match i.raw with
+    --| Syntax.ident _ _ nm _ => nm
+    --| _ => sorry
+  --| _ => sorry
 
 macro_rules
   | `(yul_literal | true) => `(doElem | pure Bool.true)
   | `(yul_literal | false) => `(doElem | pure Bool.false)
   | `(yul_literal | $n:num) => `(doElem | pure $ Word.abs $n)
   | `(yul_identifier | $i:ident) => `(doElem | pure $i)
-  | `(doElem | assembly { $s:yul_statement }) => Lean.expandMacros s
+  | `(yul_block | { $s:yul_statement* }) => do
+      let ss ← Array.mapM expandMacros s
+      `(doElem | do $ss)
+  | `(doElem | assembly $b:yul_block) => expandMacros b
   | `(yul_statement | $i:ident := $e:yul_expression)
       => do
         let ee ← Lean.expandMacros e
