@@ -110,7 +110,6 @@ macro_rules
           `(doElem | do
              let y' ← $ye
              let x' ← $xe
-             -- TODO: transform the name automatically here...
              ($nm) x' y'
            )
         | none => Macro.throwUnsupported
