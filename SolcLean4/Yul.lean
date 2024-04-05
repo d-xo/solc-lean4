@@ -3,9 +3,6 @@ import Lean
 
 open Lean Elab Meta
 
-namespace Yul
-
-
 declare_syntax_cat yul_block
 declare_syntax_cat yul_statement
 declare_syntax_cat yul_identifier
@@ -45,52 +42,6 @@ syntax yul_expression : yul_statement
 
 syntax "{" yul_statement* "}" : yul_block
 
--- Semantics --
-
-syntax "assembly {" yul_expression "}" : term
-
-instance : Coe Syntax (TSyntax `doElem) where
-  coe s := ⟨s⟩
-
-instance : Coe Syntax (TSyntax `doElem) where
-  coe s := ⟨s⟩
-
-instance : Coe Syntax (TSyntax `term) where
-  coe s := ⟨s⟩
-
-instance : Coe Syntax (TSyntax `Lean.Parser.Term.doSeqItem) where
-  coe s := ⟨s⟩
-
-macro_rules
-  | `(yul_literal | true) => `(pure Bool.true)
-  | `(yul_literal | false) => `(pure Bool.false)
-  | `(yul_literal | $n:num) => `(pure $ Word.abs $n)
-  | `(assembly { $b:yul_expression }) => Lean.expandMacros b
-  --| `(yul_block | { $[$s:yul_statement]* })
-      --=> `(do
-            --$[$s]*
-          --)
-  | `(yul_statement | $i:ident := $e:yul_expression)
-      => do
-        let ee ← Lean.expandMacros e
-        `($ee >>= (λ e' => $i ":=" e'))
-  | `(yul_statement | $e:yul_expression)
-      => do
-        let ee ← Lean.expandMacros e
-        `($ee >> (pure ()))
-  | `(yul_expression | $l:yul_literal) => Lean.expandMacros l
-  | `(yul_expression | $i:ident($x:yul_expression,$y:yul_expression))
-      => do
-        let xe ← Lean.expandMacros x
-        let ye ← Lean.expandMacros y
-        `(do
-           let y' ← $ye
-           pure ()
-           --let x' ← $xe
-           --yul_$i x' y'
-         )
-end Yul
-
 -- The type of EVM words --
 
 structure Word where
@@ -108,6 +59,59 @@ instance : BEq Word where
 instance : Hashable Word where
   hash n := hash n.rep
 
+instance : Repr Word where
+  reprPrec w := reprPrec w.rep
+
+-- Semantics --
+
+syntax "assembly {" yul_statement "}" : doElem
+
+instance : Coe Syntax (TSyntax `doElem) where
+  coe s := ⟨s⟩
+
+instance : Coe Syntax (TSyntax `term) where
+  coe s := ⟨s⟩
+
+instance : Coe Syntax (TSyntax `Lean.Parser.Term.doSeqItem) where
+  coe s := ⟨s⟩
+
+def get_name : (i : TSyntax `ident) → Name
+  | `($i:ident) => match i.raw with
+    | Syntax.ident _ _ nm _ => nm
+    | _ => sorry
+  | _ => sorry
+
+macro_rules
+  | `(yul_literal | true) => `(doElem | pure Bool.true)
+  | `(yul_literal | false) => `(doElem | pure Bool.false)
+  | `(yul_literal | $n:num) => `(doElem | pure $ Word.abs $n)
+  | `(yul_identifier | $i:ident) => `(doElem | pure $i)
+  | `(doElem | assembly { $s:yul_statement }) => Lean.expandMacros s
+  | `(yul_statement | $i:ident := $e:yul_expression)
+      => do
+        let ee ← Lean.expandMacros e
+        `(doElem | ($i) ← $ee)
+  | `(yul_statement | $e:yul_expression)
+      => do
+        let ee ← Lean.expandMacros e
+        `(doElem | _ ← $ee)
+  | `(yul_expression | $l:yul_literal) => do
+      let le ← Lean.expandMacros l
+      `(doElem | $le)
+  | `(yul_expression | $i:yul_identifier) => do
+      let ie ← Lean.expandMacros i
+      `(doElem | $ie)
+  | `(yul_expression | $i:ident($x:yul_expression,$y:yul_expression))
+      => do
+        let xe ← expandMacros x
+        let ye ← expandMacros y
+        `(doElem | do
+           let y' ← $ye
+           let x' ← $xe
+           -- TODO: transform the name automatically here...
+           ($i) x' y'
+         )
+
 -- EVM Execution Environment & OpCodes --
 
 structure EVM where
@@ -116,17 +120,16 @@ structure EVM where
 abbrev Yul (a : Type) : Type := StateM EVM a
 abbrev Sol a := Yul a
 
+def emptyEVM := EVM.mk [] Std.HashMap.empty
+
+def runSol (s : Sol a) : a := Prod.fst $ Id.run (StateT.run s emptyEVM)
+
 def yul_add (a : Word) (b : Word) : Yul Word :=
   pure (Word.abs ((a.rep + b.rep) % (2 ^ 256)))
 
-set_option pp.rawOnError true
-
---#check assembly { add(10, 11) }
-
-#check do
+#eval Id.run $ do
   let mut (x : Word) := Word.abs 0
-  --x := Word.abs 10
-  assembly { x := 10 }
+  assembly { x := 15 }
   pure x
 
 
@@ -137,6 +140,9 @@ namespace Solidity
 
 structure U256 where
   rep : Word
+
+instance : Repr U256 where
+  reprPrec u := reprPrec u.rep
 
 namespace U256
 
@@ -155,9 +161,12 @@ instance : Add U256 where
     let xw := U256.rep x
     let yw := U256.rep y
     let mut zw := Word.abs 0
-    -- This block should expand into:
-    --  z ← add xw yw
-    assembly { zw := add(xw, yw) }
+    assembly {
+      zw := yul_add(xw, yw)
+    }
     return U256.abs zw
+
+#eval runSol $ do
+  Add.add (U256.abs (Word.abs 10)) (U256.abs (Word.abs 11))
 
 end Solidity

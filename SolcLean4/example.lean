@@ -15,11 +15,14 @@ syntax "assembly {" statement "}" : doElem
 instance : Coe (Syntax) (TSyntax `term) where
   coe s := ⟨s⟩
 
+instance : Coe Syntax (TSyntax `doElem) where
+  coe s := ⟨s⟩
+
 macro_rules
-  | `(literal | $n:num) => `(term | $n)
+  | `(literal | $n:num) => `(doElem | pure $n)
   | `(statement | $i:ident := $l:literal) => do
        let le ← Lean.expandMacros l
-       `(doElem | ($i) ← pure $le)
+       `(doElem | ($i) ← $le)
   | `(doElem | assembly { $s:statement }) => `(statement | $s)
 
 -- Test Case --
