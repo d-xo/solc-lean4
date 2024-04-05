@@ -72,11 +72,11 @@ instance : Coe Syntax (TSyntax `doElem) where
 instance : Coe (Array Syntax) (TSyntax `Lean.Parser.Term.doSeq) where
   coe s := ⟨Elab.Term.Do.mkDoSeq s⟩
 
---def get_name : (i : TSyntax `ident) → Name
-  --| `($i:ident) => match i.raw with
-    --| Syntax.ident _ _ nm _ => nm
-    --| _ => sorry
-  --| _ => sorry
+def prepend_yul : (i : TSyntax `ident) → Option (TSyntax `ident)
+  | `($i:ident) => match i.raw with
+    | Syntax.ident _ _ nm _ => some $ mkIdent (Name.appendBefore nm "yul_")
+    | _ => none
+  | _ => none
 
 macro_rules
   | `(yul_literal | true) => `(doElem | pure Bool.true)
@@ -105,22 +105,27 @@ macro_rules
       => do
         let xe ← expandMacros x
         let ye ← expandMacros y
-        `(doElem | do
-           let y' ← $ye
-           let x' ← $xe
-           -- TODO: transform the name automatically here...
-           ($i) x' y'
-         )
+        match prepend_yul i with
+        | some nm =>
+          `(doElem | do
+             let y' ← $ye
+             let x' ← $xe
+             -- TODO: transform the name automatically here...
+             ($nm) x' y'
+           )
+        | none => Macro.throwUnsupported
 
 -- EVM Execution Environment & OpCodes --
 
 structure EVM where
   memory : List UInt8
+  calldata : List UInt8
+  returndata : List UInt8
   storage : Std.HashMap Word Word
 abbrev Yul (a : Type) : Type := StateM EVM a
 abbrev Sol a := Yul a
 
-def emptyEVM := EVM.mk [] Std.HashMap.empty
+def emptyEVM := EVM.mk [] [] [] Std.HashMap.empty
 
 def runSol (s : Sol a) : a := Prod.fst $ Id.run (StateT.run s emptyEVM)
 
@@ -137,7 +142,7 @@ namespace Solidity
 
 -- uint256 --
 
-
+-- TODO: add a custom command to automate the boilerplate here...
 structure U256 where
   rep : Word
 
@@ -162,7 +167,7 @@ instance : Add U256 where
     let yw := U256.rep y
     let mut zw := Word.abs 0
     assembly {
-      zw := yul_add(xw, yw)
+      zw := add(xw, yw)
     }
     return U256.abs zw
 
