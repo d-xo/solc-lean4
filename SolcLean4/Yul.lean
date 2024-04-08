@@ -49,14 +49,13 @@ syntax "{" yul_statement* "}" : yul_block
 -- The type of EVM words --
 
 structure Word where
+  abs ::
+  -- TODO: would be cool to use Fin here maybe?
   rep : Nat
 deriving Repr, Hashable, BEq
 
-namespace Word
-
-def abs := Word.mk
-
-end Word
+instance instOfNatWord (n : Nat) : OfNat Word n where
+  ofNat := Word.abs n
 
 -- Semantics --
 
@@ -68,9 +67,12 @@ instance : Coe Syntax (TSyntax `doElem) where
 instance : Coe (Array Syntax) (TSyntax `Lean.Parser.Term.doSeq) where
   coe s := ⟨Elab.Term.Do.mkDoSeq s⟩
 
+-- Prepends Yul to the hierarchical name contained in the identifier
 def prepend_yul : (i : TSyntax `ident) → Option (TSyntax `ident)
   | `($i:ident) => match i.raw with
-    | Syntax.ident _ _ nm _ => some $ mkIdent (Name.appendBefore nm "yul_")
+    | Syntax.ident _ _ nm _ => Name.append (.str .anonymous "Yul") nm
+                            |> mkIdent
+                            |> some
     | _ => none
   | _ => none
 
@@ -78,11 +80,7 @@ macro_rules
   -- literals
   | `(yul_literal | true) => `(doElem | pure Bool.true)
   | `(yul_literal | false) => `(doElem | pure Bool.false)
-  | `(yul_literal | $n:num) =>
-      let i := TSyntax.getNat n
-      if 0 < i && i < 2 ^ 256
-      then `(doElem | pure $ Word.abs $n)
-      else Macro.throwUnsupported
+  | `(yul_literal | $n:num) => `(doElem | pure $ Word.abs $n)
 
   -- identifiers
   | `(yul_identifier | $i:ident) => `(doElem | pure $i)
@@ -139,12 +137,6 @@ macro_rules
             `(doElem | do $seq)
         | none => Macro.throwUnsupported
 
-end Yul
-
-/-
-
--/
-
 -- EVM Execution Environment --
 
 structure EVM where
@@ -153,56 +145,13 @@ structure EVM where
   returndata : List UInt8
   storage : Std.HashMap Yul.Word Yul.Word
 abbrev Yul (a : Type) : Type := StateM EVM a
-abbrev Sol a := Yul a
-
-def emptyEVM := EVM.mk [] [] [] Std.HashMap.empty
-def runSol (s : Sol a) : a := Prod.fst $ Id.run (StateT.run s emptyEVM)
 
 -- OpCodes --
 
-def yul_add (a : Yul.Word) (b : Yul.Word) : Yul Yul.Word :=
-  pure (Yul.Word.abs ((a.rep + b.rep) % (2 ^ 256)))
+def add (a : Word) (b : Word) : Yul Word :=
+  pure (Word.abs ((a.rep + b.rep) % (2 ^ 256)))
 
-def yul_addmod (a : Yul.Word) (b : Yul.Word) (n : Yul.Word) : Yul Yul.Word :=
-  pure (Yul.Word.abs ((a.rep + b.rep) % n.rep))
+def addmod (a : Word) (b : Word) (n : Word) : Yul Word :=
+  pure (Word.abs ((a.rep + b.rep) % n.rep))
 
--- Solidity --
-
-namespace Solidity
-
--- uint256 --
-
-structure U256 where
-  abs ::
-  rep : Yul.Word
-deriving Repr
-
--- Addition --
-
-class Add (t : Type) where
-  add : t → t → Sol t
-
-instance : Add U256 where
-  add x y := do
-    let xw := U256.rep x
-    let yw := U256.rep y
-    let mut zw := Yul.Word.abs 0
-    /-
-      this expands to:
-
-      do
-        let y' ← pure yw
-        let x' ← pure xw
-        zw ← yul_add x' y'
-    -/
-    assembly {
-      zw := add(xw, yw)
-    }
-    return U256.abs zw
-
-#check `(do pure "hi")
-
-#eval runSol $ do
-  Add.add (U256.abs (Yul.Word.abs 10)) (U256.abs (Yul.Word.abs 11))
-
-end Solidity
+end Yul
