@@ -1,7 +1,11 @@
 import Std.Data.HashMap
 import Lean
+import Lean.Parser
+import Lean.Parser.Do
 
 open Lean Elab Meta
+
+namespace Yul
 
 declare_syntax_cat yul_block
 declare_syntax_cat yul_statement
@@ -20,7 +24,7 @@ syntax yul_identifier ("," yul_identifier)* : yul_identifier_list
 
 -- Expressions --
 
-syntax yul_identifier "(" (yul_expression ("," yul_expression)* )? ")" : yul_expression
+syntax yul_identifier "(" yul_expression,* ")" : yul_expression
 syntax yul_identifier : yul_expression
 syntax yul_literal : yul_expression
 
@@ -46,21 +50,13 @@ syntax "{" yul_statement* "}" : yul_block
 
 structure Word where
   rep : Nat
+deriving Repr, Hashable, BEq
 
 namespace Word
 
 def abs := Word.mk
 
 end Word
-
-instance : BEq Word where
-  beq a b := a.rep == b.rep
-
-instance : Hashable Word where
-  hash n := hash n.rep
-
-instance : Repr Word where
-  reprPrec w := reprPrec w.rep
 
 -- Semantics --
 
@@ -79,14 +75,25 @@ def prepend_yul : (i : TSyntax `ident) → Option (TSyntax `ident)
   | _ => none
 
 macro_rules
+  -- literals
   | `(yul_literal | true) => `(doElem | pure Bool.true)
   | `(yul_literal | false) => `(doElem | pure Bool.false)
-  | `(yul_literal | $n:num) => `(doElem | pure $ Word.abs $n)
+  | `(yul_literal | $n:num) =>
+      let i := TSyntax.getNat n
+      if 0 < i && i < 2 ^ 256
+      then `(doElem | pure $ Word.abs $n)
+      else Macro.throwUnsupported
+
+  -- identifiers
   | `(yul_identifier | $i:ident) => `(doElem | pure $i)
+
+  -- blocks
+  | `(doElem | assembly $b:yul_block) => expandMacros b
   | `(yul_block | { $s:yul_statement* }) => do
       let ss ← Array.mapM expandMacros s
       `(doElem | do $ss)
-  | `(doElem | assembly $b:yul_block) => expandMacros b
+
+  -- statements
   | `(yul_statement | $i:ident := $e:yul_expression)
       => do
         let ee ← Lean.expandMacros e
@@ -95,65 +102,80 @@ macro_rules
       => do
         let ee ← Lean.expandMacros e
         `(doElem | _ ← $ee)
+
+  -- expressions
   | `(yul_expression | $l:yul_literal) => do
       let le ← Lean.expandMacros l
       `(doElem | $le)
   | `(yul_expression | $i:yul_identifier) => do
       let ie ← Lean.expandMacros i
       `(doElem | $ie)
-  | `(yul_expression | $i:ident($x:yul_expression,$y:yul_expression))
+  | `(yul_expression | $i:ident( $xs:yul_expression,* ))
       => do
-        let xe ← expandMacros x
-        let ye ← expandMacros y
+        -- grab only the args from the sep array
+        let args := Syntax.TSepArray.getElems xs
+
+        -- macro expand the args and generate a unique name for the result
+        let exps ← Array.mapIdxM args $ λ idx arg => do
+          let exp ← expandMacros arg
+          let nm := idx |> .num .anonymous |> mkIdent
+          let syn ← `(doElem | let $nm ← $exp)
+          pure (nm, syn)
+
+        -- prepend the function name with yul_
         match prepend_yul i with
-        | some nm =>
-          `(doElem | do
-             let y' ← $ye
-             let x' ← $xe
-             ($nm) x' y'
-           )
+        | some fn => do
+            -- yul evaluates function args right to left, so we reverse
+            let calls := Array.map Prod.snd exps |> Array.reverse
+
+            -- call fn with the result of evaluating it's arguments
+            let results := Array.map Prod.fst exps
+            let info ← MonadRef.mkInfoFromRefPos
+            let exec := Syntax.mkApp fn results
+                     |> Syntax.node1 info `Lean.Parser.Term.doExpr
+
+            -- squash everything together into a do block
+            let seq := Array.push calls exec
+            `(doElem | do $seq)
         | none => Macro.throwUnsupported
 
--- EVM Execution Environment & OpCodes --
+end Yul
+
+/-
+
+-/
+
+-- EVM Execution Environment --
 
 structure EVM where
   memory : List UInt8
   calldata : List UInt8
   returndata : List UInt8
-  storage : Std.HashMap Word Word
+  storage : Std.HashMap Yul.Word Yul.Word
 abbrev Yul (a : Type) : Type := StateM EVM a
 abbrev Sol a := Yul a
 
 def emptyEVM := EVM.mk [] [] [] Std.HashMap.empty
-
 def runSol (s : Sol a) : a := Prod.fst $ Id.run (StateT.run s emptyEVM)
 
-def yul_add (a : Word) (b : Word) : Yul Word :=
-  pure (Word.abs ((a.rep + b.rep) % (2 ^ 256)))
+-- OpCodes --
 
-#eval Id.run $ do
-  let mut (x : Word) := Word.abs 0
-  assembly { x := 15 }
-  pure x
+def yul_add (a : Yul.Word) (b : Yul.Word) : Yul Yul.Word :=
+  pure (Yul.Word.abs ((a.rep + b.rep) % (2 ^ 256)))
 
+def yul_addmod (a : Yul.Word) (b : Yul.Word) (n : Yul.Word) : Yul Yul.Word :=
+  pure (Yul.Word.abs ((a.rep + b.rep) % n.rep))
+
+-- Solidity --
 
 namespace Solidity
 
 -- uint256 --
 
--- TODO: add a custom command to automate the boilerplate here...
 structure U256 where
-  rep : Word
-
-instance : Repr U256 where
-  reprPrec u := reprPrec u.rep
-
-namespace U256
-
-def abs := U256.mk
-
-end U256
-
+  abs ::
+  rep : Yul.Word
+deriving Repr
 
 -- Addition --
 
@@ -164,13 +186,23 @@ instance : Add U256 where
   add x y := do
     let xw := U256.rep x
     let yw := U256.rep y
-    let mut zw := Word.abs 0
+    let mut zw := Yul.Word.abs 0
+    /-
+      this expands to:
+
+      do
+        let y' ← pure yw
+        let x' ← pure xw
+        zw ← yul_add x' y'
+    -/
     assembly {
       zw := add(xw, yw)
     }
     return U256.abs zw
 
+#check `(do pure "hi")
+
 #eval runSol $ do
-  Add.add (U256.abs (Word.abs 10)) (U256.abs (Word.abs 11))
+  Add.add (U256.abs (Yul.Word.abs 10)) (U256.abs (Yul.Word.abs 11))
 
 end Solidity
