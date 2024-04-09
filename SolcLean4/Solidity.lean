@@ -38,6 +38,28 @@ instance : Add U256 where
     }
     return U256.abs zw
 
+
+-- Memory References --
+
+structure Memory (t : Type) where
+  abs ::
+  rep : Yul.Word
+deriving Repr
+
+class Ref (ref : Type) (deref : Type) where
+  load : ref -> Sol deref
+  store : ref -> deref -> Sol Unit
+
+instance : Ref (Memory U256) U256 where
+  load ref := do
+    let rw := ref.rep
+    let mut res := 0
+    assembly {
+      res := mload(rw)
+    }
+    return $ U256.abs res
+  store ref val := sorry
+
 #eval runSol $ do
   Add.add (U256.abs 9) (U256.abs 12)
 

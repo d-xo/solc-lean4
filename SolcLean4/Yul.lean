@@ -1,9 +1,10 @@
-import Std.Data.HashMap
 import Lean
-import Lean.Parser
-import Lean.Parser.Do
+import Std.Data.HashMap
+import Init.Data.BitVec
+import Mathlib.Data.Nat.Bits
+import Mathlib.Computability.Encoding
 
-open Lean Elab Meta
+open Lean Elab Meta BitVec
 
 namespace Yul
 
@@ -46,16 +47,18 @@ syntax yul_expression : yul_statement
 
 syntax "{" yul_statement* "}" : yul_block
 
--- The type of EVM words --
+-- Core EVM Types --
 
-structure Word where
-  abs ::
-  -- TODO: would be cool to use Fin here maybe?
-  rep : Nat
-deriving Repr, Hashable, BEq
+abbrev Word := BitVec 256
+abbrev Addr := BitVec 160
+abbrev Byte := BitVec 8
+abbrev Buf := Array Byte
 
-instance instOfNatWord (n : Nat) : OfNat Word n where
-  ofNat := Word.abs n
+instance : Hashable Word where
+  hash := hash ∘ BitVec.toNat
+
+instance : Hashable Addr where
+  hash := hash ∘ BitVec.toNat
 
 -- Semantics --
 
@@ -140,18 +143,104 @@ macro_rules
 -- EVM Execution Environment --
 
 structure EVM where
-  memory : List UInt8
-  calldata : List UInt8
-  returndata : List UInt8
-  storage : Std.HashMap Yul.Word Yul.Word
+  memory : Buf
+  calldata : Buf
+  returndata : Buf
+  storage : Std.HashMap Addr (Std.HashMap Word Word)
 abbrev Yul (a : Type) : Type := StateM EVM a
+
+-- Utils --
+
+def padBuf (buf : Buf) (sz : Nat) (val : Byte) : Buf :=
+  if sz <= buf.size
+  then buf
+  else
+    let padding := Array.mkArray (sz - Array.size buf) val
+    Array.append buf padding
+
+-- NOTE: we handle the pathological case where idx + 32 overflows by just
+-- reading zeros past the end. this case is actually UB according to geth, so
+-- it doesn't really matter what we do here.
+def readWord (buf : Buf) (idx : Word) : Word :=
+  let n := BitVec.toNat idx
+  let bytes : Subarray Byte :=
+    { as := padBuf buf (n + 32) 0
+    , start := n
+    , stop := n + 32
+    , h₁ := by simp
+    , h₂ := by
+        unfold padBuf
+        · by_cases hsz : n + 32 <= buf.size
+          · simp [hsz]
+          · simp [hsz]
+            unfold Array.size
+            simp
+            simp [Nat.lt_of_not_le] at hsz
+            rw [←Nat.add_sub_assoc, Nat.add_sub_cancel_left]
+            apply Nat.le_of_lt
+            assumption
+    }
+
+  let sz_theorem : bytes.size = 32 := by unfold Subarray.size; simp
+  let idx_theorem (i : Nat) : i < 32 → i < bytes.size := by
+    intro h
+    rw [←sz_theorem] at h
+    assumption
+
+  -- TODO: this is ugly af...
+  bytes[0]'(by simp [idx_theorem])
+  ++ bytes[1]'(by simp [idx_theorem])
+  ++ bytes[2]'(by simp [idx_theorem])
+  ++ bytes[3]'(by simp [idx_theorem])
+  ++ bytes[4]'(by simp [idx_theorem])
+  ++ bytes[5]'(by simp [idx_theorem])
+  ++ bytes[6]'(by simp [idx_theorem])
+  ++ bytes[7]'(by simp [idx_theorem])
+  ++ bytes[8]'(by simp [idx_theorem])
+  ++ bytes[9]'(by simp [idx_theorem])
+  ++ bytes[10]'(by simp [idx_theorem])
+  ++ bytes[11]'(by simp [idx_theorem])
+  ++ bytes[12]'(by simp [idx_theorem])
+  ++ bytes[13]'(by simp [idx_theorem])
+  ++ bytes[14]'(by simp [idx_theorem])
+  ++ bytes[15]'(by simp [idx_theorem])
+  ++ bytes[16]'(by simp [idx_theorem])
+  ++ bytes[17]'(by simp [idx_theorem])
+  ++ bytes[18]'(by simp [idx_theorem])
+  ++ bytes[19]'(by simp [idx_theorem])
+  ++ bytes[20]'(by simp [idx_theorem])
+  ++ bytes[21]'(by simp [idx_theorem])
+  ++ bytes[22]'(by simp [idx_theorem])
+  ++ bytes[23]'(by simp [idx_theorem])
+  ++ bytes[24]'(by simp [idx_theorem])
+  ++ bytes[25]'(by simp [idx_theorem])
+  ++ bytes[26]'(by simp [idx_theorem])
+  ++ bytes[27]'(by simp [idx_theorem])
+  ++ bytes[28]'(by simp [idx_theorem])
+  ++ bytes[29]'(by simp [idx_theorem])
+  ++ bytes[30]'(by simp [idx_theorem])
+  ++ bytes[31]'(by simp [idx_theorem])
+
+def writeWord (buf : Buf) (idx : Word) (val : Word) : Buf :=
+  sorry
 
 -- OpCodes --
 
+def mload (loc : Word) : Yul Word := do
+  let evm ← get
+  pure $ readWord evm.memory loc
+
+def mstore (off : Word) (val : Word) : Yul Unit := do
+  let evm ← get
+  set $ { evm with memory := writeWord evm.memory off val }
+
 def add (a : Word) (b : Word) : Yul Word :=
-  pure (Word.abs ((a.rep + b.rep) % (2 ^ 256)))
+  pure $ a + b
 
 def addmod (a : Word) (b : Word) (n : Word) : Yul Word :=
-  pure (Word.abs ((a.rep + b.rep) % n.rep))
+  pure (BitVec.ofNat 256 ((BitVec.toNat a + BitVec.toNat b) % BitVec.toNat n))
+
+-- Helpers --
+
 
 end Yul
