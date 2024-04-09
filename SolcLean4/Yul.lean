@@ -1,8 +1,11 @@
+import Aesop
 import Lean
 import Std.Data.HashMap
+import Init.Data.Nat
 import Init.Data.BitVec
 import Mathlib.Data.Nat.Bits
 import Mathlib.Computability.Encoding
+import Std.Data.Array.Lemmas
 
 open Lean Elab Meta BitVec
 
@@ -73,9 +76,8 @@ instance : Coe (Array Syntax) (TSyntax `Lean.Parser.Term.doSeq) where
 -- Prepends Yul to the hierarchical name contained in the identifier
 def prepend_yul : (i : TSyntax `ident) → Option (TSyntax `ident)
   | `($i:ident) => match i.raw with
-    | Syntax.ident _ _ nm _ => Name.append (.str .anonymous "Yul") nm
-                            |> mkIdent
-                            |> some
+    | Syntax.ident _ _ nm _
+      => Name.append (.str .anonymous "Yul") nm |> mkIdent |> some
     | _ => none
   | _ => none
 
@@ -123,7 +125,7 @@ macro_rules
           let syn ← `(doElem | let $nm ← $exp)
           pure (nm, syn)
 
-        -- prepend the function name with yul_
+        -- prepend the function name with the Yul namespace qualifier
         match prepend_yul i with
         | some fn => do
             -- yul evaluates function args right to left, so we reverse
@@ -149,14 +151,100 @@ structure EVM where
   storage : Std.HashMap Addr (Std.HashMap Word Word)
 abbrev Yul (a : Type) : Type := StateM EVM a
 
--- Utils --
 
+---------------------------------------------------------------------------------------------------
+-- Utils
+---------------------------------------------------------------------------------------------------
+
+
+-- padBuf --
+
+
+/--
+padBuf extends buf until it's size is sz by appending vals
+-/
 def padBuf (buf : Buf) (sz : Nat) (val : Byte) : Buf :=
   if sz <= buf.size
   then buf
   else
     let padding := Array.mkArray (sz - Array.size buf) val
     Array.append buf padding
+
+-- padBuf is a noop if sz <= buf.size
+theorem padBuf_noop_sz_lt : ∀ buf sz val, sz ≤ buf.size → padBuf buf sz val = buf := by
+  intro buf sz val h
+  unfold padBuf
+  simp [*]
+
+-- padBuf expands to sz if buf.size < sz
+theorem padBuf_size_eq_sz buf sz val (h : sz > buf.size) : (padBuf buf sz val).size = sz := by
+  unfold padBuf
+  simp [Nat.not_le_of_lt h]
+  unfold Array.size; simp
+  rw [←Nat.add_sub_assoc, Nat.add_sub_self_left]
+  apply Nat.le_of_lt h
+
+-- padBuf buf sz val is never smaller than buf
+theorem padBuf_never_decreases_size
+  : ∀ buf sz val
+  , buf.size ≤ (padBuf buf sz val).size := by
+    intro buf sz val
+    unfold padBuf
+    by_cases hsz : sz ≤ buf.size
+    · simp [hsz]
+    · simp [hsz]
+      unfold mkArray
+      unfold Array.size
+      simp
+
+-- buf is a prefix of padBuf buf sz val
+theorem padBuf_only_appends b s v i
+  (h₁ : i < b.size)
+  (h₂ : i < (padBuf b s v).size := Nat.lt_of_lt_of_le h₁ (padBuf_never_decreases_size b s v))
+  : b[i]'h₁ = (padBuf b s v)[i]'h₂ := by
+    unfold padBuf
+    simp
+    by_cases hsz : s ≤ b.size
+    · simp [hsz]
+    · simp [hsz]
+      simp [Array.get_append_left h₁]
+
+-- all elements past buf.size in the padded buffer are val
+theorem padBuf_fills_vals buf sz val i
+  (hsz : sz > buf.size)
+  (hmin : buf.size ≤ i)
+  (hmax : i < sz)
+  (hidx : i < (padBuf buf sz val).size
+    := lt_of_lt_of_eq hmax (Eq.symm $ padBuf_size_eq_sz buf sz val hsz))
+  : (padBuf buf sz val)[i]'(hidx) = val := by
+    unfold padBuf
+    simp [Nat.not_le_of_lt hsz]
+    simp [Array.get_append_right hmin]
+
+
+-- joinBytes --
+
+
+def joinBytes (bytes : Subarray (BitVec b)) : BitVec (bytes.size * b) :=
+  BitVec.cast (by simp) $ go bytes.size (by rfl) BitVec.nil
+  where
+    go {m : ℕ} (n : Nat) (thm : n <= bytes.size) (res : BitVec m) : BitVec (m + (n * b))
+    := match n with
+    | 0 => BitVec.cast (by simp) res
+    | Nat.succ x
+      => let n := Nat.succ x
+         have add_thm : m + b + (x * b) = m + Nat.succ x * b := by
+           simp [Nat.succ_mul, Nat.add_assoc]
+           simp [Nat.add_comm]
+         have idx_thm : bytes.size - n < bytes.size := by
+           have npos : 0 < n := by simp
+           have szpos : 0 < bytes.size := Nat.lt_of_lt_of_le npos thm
+           apply Nat.sub_lt
+           apply szpos
+           assumption
+         let next := BitVec.append res (bytes[bytes.size - n]'(idx_thm))
+         BitVec.cast add_thm $ go x (Nat.le_of_succ_le thm) next
+
 
 -- NOTE: we handle the pathological case where idx + 32 overflows by just
 -- reading zeros past the end. this case is actually UB according to geth, so
@@ -170,56 +258,20 @@ def readWord (buf : Buf) (idx : Word) : Word :=
     , h₁ := by simp
     , h₂ := by
         unfold padBuf
-        · by_cases hsz : n + 32 <= buf.size
-          · simp [hsz]
-          · simp [hsz]
-            unfold Array.size
-            simp
-            simp [Nat.lt_of_not_le] at hsz
-            rw [←Nat.add_sub_assoc, Nat.add_sub_cancel_left]
-            apply Nat.le_of_lt
-            assumption
+        by_cases hsz : n + 32 <= buf.size
+        · simp [hsz]
+        · simp [hsz]
+          unfold Array.size
+          simp
+          simp [Nat.lt_of_not_le] at hsz
+          rw [←Nat.add_sub_assoc, Nat.add_sub_cancel_left]
+          apply Nat.le_of_lt
+          assumption
     }
-
-  let sz_theorem : bytes.size = 32 := by unfold Subarray.size; simp
-  let idx_theorem (i : Nat) : i < 32 → i < bytes.size := by
-    intro h
-    rw [←sz_theorem] at h
-    assumption
-
-  -- TODO: this is ugly af...
-  bytes[0]'(by simp [idx_theorem])
-  ++ bytes[1]'(by simp [idx_theorem])
-  ++ bytes[2]'(by simp [idx_theorem])
-  ++ bytes[3]'(by simp [idx_theorem])
-  ++ bytes[4]'(by simp [idx_theorem])
-  ++ bytes[5]'(by simp [idx_theorem])
-  ++ bytes[6]'(by simp [idx_theorem])
-  ++ bytes[7]'(by simp [idx_theorem])
-  ++ bytes[8]'(by simp [idx_theorem])
-  ++ bytes[9]'(by simp [idx_theorem])
-  ++ bytes[10]'(by simp [idx_theorem])
-  ++ bytes[11]'(by simp [idx_theorem])
-  ++ bytes[12]'(by simp [idx_theorem])
-  ++ bytes[13]'(by simp [idx_theorem])
-  ++ bytes[14]'(by simp [idx_theorem])
-  ++ bytes[15]'(by simp [idx_theorem])
-  ++ bytes[16]'(by simp [idx_theorem])
-  ++ bytes[17]'(by simp [idx_theorem])
-  ++ bytes[18]'(by simp [idx_theorem])
-  ++ bytes[19]'(by simp [idx_theorem])
-  ++ bytes[20]'(by simp [idx_theorem])
-  ++ bytes[21]'(by simp [idx_theorem])
-  ++ bytes[22]'(by simp [idx_theorem])
-  ++ bytes[23]'(by simp [idx_theorem])
-  ++ bytes[24]'(by simp [idx_theorem])
-  ++ bytes[25]'(by simp [idx_theorem])
-  ++ bytes[26]'(by simp [idx_theorem])
-  ++ bytes[27]'(by simp [idx_theorem])
-  ++ bytes[28]'(by simp [idx_theorem])
-  ++ bytes[29]'(by simp [idx_theorem])
-  ++ bytes[30]'(by simp [idx_theorem])
-  ++ bytes[31]'(by simp [idx_theorem])
+  let res_thm : BitVec (bytes.size * 8) = Word := by
+    have : bytes.size = 32 := by unfold Subarray.size; simp
+    simp [this]
+  res_thm ▸ joinBytes bytes
 
 def writeWord (buf : Buf) (idx : Word) (val : Word) : Buf :=
   sorry
