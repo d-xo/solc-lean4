@@ -27,6 +27,11 @@ instance : Add U256 where
     let xw := U256.rep x
     let yw := U256.rep y
     let mut zw := 0
+    /-
+      let y' ← pure yw
+      let x' ← pure xw
+      zw := Yul.add x' y'
+    -/
     assembly {
       zw := add(xw, yw)
     }

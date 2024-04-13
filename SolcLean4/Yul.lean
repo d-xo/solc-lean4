@@ -2,12 +2,18 @@ import Aesop
 import Lean
 import Std.Data.HashMap
 import Init.Data.Nat
+import Init.Data.Nat.Lemmas
 import Init.Data.BitVec
 import Mathlib.Data.Nat.Bits
+import Mathlib.Data.PNat.Defs
+import Mathlib.Data.PNat.Basic
 import Mathlib.Computability.Encoding
+import Mathlib.Tactic.Linarith
+import Mathlib.Tactic.Ring
 import Std.Data.Array.Lemmas
+import «SolcLean4».Util
 
-open Lean Elab Meta BitVec
+open Lean BitVec Vector Nat
 
 namespace Yul
 
@@ -85,13 +91,14 @@ macro_rules
   -- literals
   | `(yul_literal | true) => `(doElem | pure Bool.true)
   | `(yul_literal | false) => `(doElem | pure Bool.false)
-  | `(yul_literal | $n:num) => `(doElem | pure $ Word.abs $n)
+  | `(yul_literal | $n:num) => `(doElem | pure $n)
 
   -- identifiers
   | `(yul_identifier | $i:ident) => `(doElem | pure $i)
 
   -- blocks
   | `(doElem | assembly $b:yul_block) => expandMacros b
+
   | `(yul_block | { $s:yul_statement* }) => do
       let ss ← Array.mapM expandMacros s
       `(doElem | do $ss)
@@ -142,7 +149,9 @@ macro_rules
             `(doElem | do $seq)
         | none => Macro.throwUnsupported
 
+
 -- EVM Execution Environment --
+
 
 structure EVM where
   memory : Buf
@@ -152,98 +161,7 @@ structure EVM where
 abbrev Yul (a : Type) : Type := StateM EVM a
 
 
----------------------------------------------------------------------------------------------------
--- Utils
----------------------------------------------------------------------------------------------------
-
-
--- padBuf --
-
-
-/--
-padBuf extends buf until it's size is sz by appending vals
--/
-def padBuf (buf : Buf) (sz : Nat) (val : Byte) : Buf :=
-  if sz <= buf.size
-  then buf
-  else
-    let padding := Array.mkArray (sz - Array.size buf) val
-    Array.append buf padding
-
--- padBuf is a noop if sz <= buf.size
-theorem padBuf_noop_sz_lt : ∀ buf sz val, sz ≤ buf.size → padBuf buf sz val = buf := by
-  intro buf sz val h
-  unfold padBuf
-  simp [*]
-
--- padBuf expands to sz if buf.size < sz
-theorem padBuf_size_eq_sz buf sz val (h : sz > buf.size) : (padBuf buf sz val).size = sz := by
-  unfold padBuf
-  simp [Nat.not_le_of_lt h]
-  unfold Array.size; simp
-  rw [←Nat.add_sub_assoc, Nat.add_sub_self_left]
-  apply Nat.le_of_lt h
-
--- padBuf buf sz val is never smaller than buf
-theorem padBuf_never_decreases_size
-  : ∀ buf sz val
-  , buf.size ≤ (padBuf buf sz val).size := by
-    intro buf sz val
-    unfold padBuf
-    by_cases hsz : sz ≤ buf.size
-    · simp [hsz]
-    · simp [hsz]
-      unfold mkArray
-      unfold Array.size
-      simp
-
--- buf is a prefix of padBuf buf sz val
-theorem padBuf_only_appends b s v i
-  (h₁ : i < b.size)
-  (h₂ : i < (padBuf b s v).size := Nat.lt_of_lt_of_le h₁ (padBuf_never_decreases_size b s v))
-  : b[i]'h₁ = (padBuf b s v)[i]'h₂ := by
-    unfold padBuf
-    simp
-    by_cases hsz : s ≤ b.size
-    · simp [hsz]
-    · simp [hsz]
-      simp [Array.get_append_left h₁]
-
--- all elements past buf.size in the padded buffer are val
-theorem padBuf_fills_vals buf sz val i
-  (hsz : sz > buf.size)
-  (hmin : buf.size ≤ i)
-  (hmax : i < sz)
-  (hidx : i < (padBuf buf sz val).size
-    := lt_of_lt_of_eq hmax (Eq.symm $ padBuf_size_eq_sz buf sz val hsz))
-  : (padBuf buf sz val)[i]'(hidx) = val := by
-    unfold padBuf
-    simp [Nat.not_le_of_lt hsz]
-    simp [Array.get_append_right hmin]
-
-
--- joinBytes --
-
-
-def joinBytes (bytes : Subarray (BitVec b)) : BitVec (bytes.size * b) :=
-  BitVec.cast (by simp) $ go bytes.size (by rfl) BitVec.nil
-  where
-    go {m : ℕ} (n : Nat) (thm : n <= bytes.size) (res : BitVec m) : BitVec (m + (n * b))
-    := match n with
-    | 0 => BitVec.cast (by simp) res
-    | Nat.succ x
-      => let n := Nat.succ x
-         have add_thm : m + b + (x * b) = m + Nat.succ x * b := by
-           simp [Nat.succ_mul, Nat.add_assoc]
-           simp [Nat.add_comm]
-         have idx_thm : bytes.size - n < bytes.size := by
-           have npos : 0 < n := by simp
-           have szpos : 0 < bytes.size := Nat.lt_of_lt_of_le npos thm
-           apply Nat.sub_lt
-           apply szpos
-           assumption
-         let next := BitVec.append res (bytes[bytes.size - n]'(idx_thm))
-         BitVec.cast add_thm $ go x (Nat.le_of_succ_le thm) next
+-- readWord --
 
 
 -- NOTE: we handle the pathological case where idx + 32 overflows by just
@@ -252,31 +170,31 @@ def joinBytes (bytes : Subarray (BitVec b)) : BitVec (bytes.size * b) :=
 def readWord (buf : Buf) (idx : Word) : Word :=
   let n := BitVec.toNat idx
   let bytes : Subarray Byte :=
-    { as := padBuf buf (n + 32) 0
+    { as := padRight buf (n + 32) 0
     , start := n
     , stop := n + 32
     , h₁ := by simp
-    , h₂ := by
-        unfold padBuf
-        by_cases hsz : n + 32 <= buf.size
-        · simp [hsz]
-        · simp [hsz]
-          unfold Array.size
-          simp
-          simp [Nat.lt_of_not_le] at hsz
-          rw [←Nat.add_sub_assoc, Nat.add_sub_cancel_left]
-          apply Nat.le_of_lt
-          assumption
+    , h₂ := padRight_sz_le
     }
-  let res_thm : BitVec (bytes.size * 8) = Word := by
+  let res_thm : 8 * bytes.size = 256 := by
     have : bytes.size = 32 := by unfold Subarray.size; simp
     simp [this]
-  res_thm ▸ joinBytes bytes
+  BitVec.cast res_thm (BitVec.join (Subarray.toVector bytes))
 
-def writeWord (buf : Buf) (idx : Word) (val : Word) : Buf :=
-  sorry
+def writeWord (buf : Buf) (start : Word) (val : Word) : Buf :=
+  let bytes := BitVec.chunk 8 32 val
+  let s := start.toNat
+  -- TODO: this is a bit fucked! the buf can grow larger than u256!
+  let padded := padRight buf (s + 32) 0
+  Array.mapIdx buf (λ i v =>
+    if s ≤ i && i < s + 32
+    then bytes[i - s]'(by sorry)
+    else v
+  )
+
 
 -- OpCodes --
+
 
 def mload (loc : Word) : Yul Word := do
   let evm ← get
@@ -291,6 +209,7 @@ def add (a : Word) (b : Word) : Yul Word :=
 
 def addmod (a : Word) (b : Word) (n : Word) : Yul Word :=
   pure (BitVec.ofNat 256 ((BitVec.toNat a + BitVec.toNat b) % BitVec.toNat n))
+
 
 -- Helpers --
 
