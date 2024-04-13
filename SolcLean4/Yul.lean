@@ -28,6 +28,7 @@ declare_syntax_cat yul_literal
 
 -- TODO: yul has different identifier rules than the built in lean parser...
 syntax ident : yul_identifier
+syntax "return" : yul_identifier
 
 -- IdentifierList = Identifier ( ',' Identifier)*
 syntax yul_identifier ("," yul_identifier)* : yul_identifier_list
@@ -120,6 +121,16 @@ macro_rules
   | `(yul_expression | $i:yul_identifier) => do
       let ie ← Lean.expandMacros i
       `(doElem | $ie)
+  -- we can't use the generic expansion below as `return` is a keyword in lean
+  | `(yul_expression | return($off:yul_expression, $sz:yul_expression))
+      => do
+        let offe ← expandMacros off
+        let sze ← expandMacros sz
+        `(do
+            let sz' ← $sze
+            let off' ← $offe
+            Yul._return off' sz'
+        )
   | `(yul_expression | $i:ident( $xs:yul_expression,* ))
       => do
         -- grab only the args from the sep array
@@ -153,12 +164,34 @@ macro_rules
 -- EVM Execution Environment --
 
 
-structure EVM where
+structure CallFrame where
+  adress : Addr
   memory : Buf
   calldata : Buf
   returndata : Buf
+deriving Repr
+
+instance : EmptyCollection CallFrame where
+  emptyCollection := CallFrame.mk 0 #[] #[] #[]
+
+structure VM where
+  call : CallFrame
+  frames : List CallFrame
   storage : Std.HashMap Addr (Std.HashMap Word Word)
-abbrev Yul (a : Type) : Type := StateM EVM a
+
+-- TODO: make this not bad...
+instance : Repr VM where
+  reprPrec _ n := Repr.addAppParen "VM {}" n
+
+instance : EmptyCollection VM where
+  emptyCollection := VM.mk {} [] {}
+
+inductive Result where
+  | Success (vm : VM)
+  | Revert (msg : Buf)
+deriving Repr
+
+abbrev EVM (a : Type) := ExceptT Result (StateM VM) a
 
 
 -- readWord --
@@ -195,20 +228,45 @@ def writeWord (buf : Buf) (start : Word) (val : Word) : Buf :=
 
 -- OpCodes --
 
-
-def mload (loc : Word) : Yul Word := do
+def calldataload (loc : Word) : EVM Word := do
   let evm ← get
-  pure $ readWord evm.memory loc
+  pure $ readWord evm.call.calldata loc
 
-def mstore (off : Word) (val : Word) : Yul Unit := do
+def mload (loc : Word) : EVM Word := do
   let evm ← get
-  set $ { evm with memory := writeWord evm.memory off val }
+  pure $ readWord evm.call.memory loc
 
-def add (a : Word) (b : Word) : Yul Word :=
+def mstore (off : Word) (val : Word) : EVM Unit := do
+  let evm ← get
+  set $ { evm with call.memory := writeWord evm.call.memory off val }
+
+def add (a : Word) (b : Word) : EVM Word :=
   pure $ a + b
 
-def addmod (a : Word) (b : Word) (n : Word) : Yul Word :=
+def mul (a : Word) (b : Word) : EVM Word :=
+  pure $ a * b
+
+def addmod (a : Word) (b : Word) (n : Word) : EVM Word :=
   pure (BitVec.ofNat 256 ((BitVec.toNat a + BitVec.toNat b) % BitVec.toNat n))
+
+def shr (shift : Word) (val : Word) : EVM Word :=
+  pure $ BitVec.ushiftRight val shift.toNat
+
+def _return (offset : Word) (size: Word) : EVM Unit := do
+  let evm ← get
+  let off := offset.toNat
+  let sz := size.toNat
+  let mem := padRight evm.call.memory (off + sz) 0
+  let data := (mem[off:off+sz]).toArray
+  match evm.frames with
+  | [] =>
+    throw $ Result.Success { evm with call.returndata := data }
+  | x::xs => do
+    set $ { evm with
+      call := { x with returndata := data }
+      frames := xs
+    }
+
 
 
 -- Helpers --
