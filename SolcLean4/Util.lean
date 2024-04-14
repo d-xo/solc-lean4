@@ -124,10 +124,9 @@ def Subarray.toVector (arr : Subarray t) : Vector t (arr.size) := Vector.ofFn (�
 
 
 def BitVec.join (bytes : Vector (BitVec b) sz) : BitVec (b * sz) :=
-  have cast_thm {i} : b + i * b = (i + 1) * b := by rw [add_comm, mul_comm, ←mul_succ, mul_comm]
   BitVec.cast (mul_comm sz b) $ dfoldr
     (λ i => BitVec (i * b))
-    (λ i val acc => BitVec.cast cast_thm (BitVec.append val acc))
+    (λ i val acc => BitVec.cast (by ring) (BitVec.append val acc))
     (BitVec.cast (by simp) BitVec.nil)
     bytes
 
@@ -135,7 +134,7 @@ def BitVec.chunk (chunk : ℕ+) (num : ℕ) (bv : BitVec (chunk * num)) : Vector
   Vector.ofFn (λ i =>
     let hi : ℕ := (chunk * num) - (chunk * i)
     let lo := hi - chunk
-    have : 1 ≤ (chunk : Nat) := by apply chunk.property
+    have : 1 ≤ (chunk : Nat) := chunk.property
     have : chunk + (chunk * i : Nat) ≤ chunk * num := by
       rw [add_comm, ←mul_succ]; apply Nat.mul_le_mul_left; omega
     BitVec.cast (by omega) $ BitVec.extractLsb (hi - 1) lo bv
@@ -156,4 +155,3 @@ theorem split_join_inverse (bs : Vector (BitVec b) sz) (i : Fin sz) (h: b > 0)
         unfold instGetElemVectorNatLtInstLTNat
         simp [Vector.get_ofFn]
         sorry
-

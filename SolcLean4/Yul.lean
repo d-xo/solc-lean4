@@ -51,6 +51,7 @@ syntax str : yul_literal
 
 syntax yul_block : yul_statement
 syntax ident ":=" yul_expression : yul_statement
+syntax "let" ident ":=" yul_expression : yul_statement
 syntax yul_expression : yul_statement
 
 -- Blocks --
@@ -105,6 +106,10 @@ macro_rules
       `(doElem | do $ss)
 
   -- statements
+  | `(yul_statement | let $i:ident := $e:yul_expression)
+      => do
+        let ee ← Lean.expandMacros e
+        `(doElem | let mut ($i) ← $ee)
   | `(yul_statement | $i:ident := $e:yul_expression)
       => do
         let ee ← Lean.expandMacros e
@@ -125,12 +130,19 @@ macro_rules
   | `(yul_expression | return($off:yul_expression, $sz:yul_expression))
       => do
         let offe ← expandMacros off
+        let offi := .str .anonymous "off'" |> mkIdent
         let sze ← expandMacros sz
-        `(do
-            let sz' ← $sze
-            let off' ← $offe
-            Yul._return off' sz'
-        )
+        let szi := .str .anonymous "sz'" |> mkIdent
+        let nm := (.str (.str .anonymous "Yul") "_return") |> mkIdent
+        let info ← MonadRef.mkInfoFromRefPos
+        let call := Syntax.mkApp nm #[offi,szi]
+                 |> Syntax.node1 info `Lean.Parser.Term.doExpr
+        let seq : Array Syntax :=
+          #[ ←`(doElem | let $szi ← $sze)
+           , ←`(doElem | let $offi ← $offe)
+           , call
+           ]
+        `(doElem | do $seq)
   | `(yul_expression | $i:ident( $xs:yul_expression,* ))
       => do
         -- grab only the args from the sep array
@@ -186,9 +198,14 @@ instance : Repr VM where
 instance : EmptyCollection VM where
   emptyCollection := VM.mk {} [] {}
 
+inductive Error where
+| Revert (msg : Buf)
+| MemoryOOB
+deriving Repr
+
 inductive Result where
-  | Success (vm : VM)
-  | Revert (msg : Buf)
+| Success (vm : VM)
+| Failure (err : Error)
 deriving Repr
 
 abbrev EVM (a : Type) := ExceptT Result (StateM VM) a
@@ -232,6 +249,32 @@ def calldataload (loc : Word) : EVM Word := do
   let evm ← get
   pure $ readWord evm.call.calldata loc
 
+-- TODO: unify logic with mcopy / returndatacopy
+def calldatacopy (dstOffset : Word) (srcOffset : Word) (size : Word) : EVM Unit := do
+  let dstOff := dstOffset.toNat
+  let srcOff := srcOffset.toNat
+  let sz := size.toNat
+
+  -- bounds checks
+  if dstOff + sz ≥ 2 ^ 256 || srcOff + sz ≥ 2 ^ 256 then
+    throw (Result.Failure Error.MemoryOOB)
+
+  let evm ← get
+  let memory := padRight evm.call.memory (dstOff + sz) 0
+  let calldata := padRight evm.call.calldata (dstOff + sz) 0
+
+  let slice := calldata[srcOff:srcOff+sz]
+
+  let mut mem := memory
+  for (idx,val) in Array.zip (Fin.enum slice.size) slice.toArray do
+    let writeLoc := Fin.mk (dstOff + idx) (by sorry)
+    mem := Array.set mem writeLoc val
+  set $ { evm with call.memory := mem }
+
+def calldatasize : EVM Word := do
+  let evm ← get
+  pure $ evm.call.calldata.size
+
 def mload (loc : Word) : EVM Word := do
   let evm ← get
   pure $ readWord evm.call.memory loc
@@ -240,11 +283,60 @@ def mstore (off : Word) (val : Word) : EVM Unit := do
   let evm ← get
   set $ { evm with call.memory := writeWord evm.call.memory off val }
 
+def mstore8 (offset : Word) (val : Word) : EVM Unit := do
+  if offset.toNat + 1 ≥ 2 ^ 256 then
+    throw (Result.Failure Error.MemoryOOB)
+  let evm ← get
+  let byte := BitVec.extractLsb' 0 8 val
+  let padded := padRight evm.call.memory (offset.toNat + 1) 0
+  have : (offset.toNat + 1) ≤ padded.size
+    := by dsimp [padded]; simp [padRight_sz_le]
+  let loc := Fin.mk offset.toNat (by aesop)
+  set $ { evm with call.memory := Array.set padded loc byte }
+
+def mcopy (dstOffset : Word) (offset : Word) (size : Word) : EVM Unit := do
+  let dstOff := dstOffset.toNat
+  let srcOff := offset.toNat
+  let sz := size.toNat
+
+  -- bounds checks
+  if dstOff + sz ≥ 2 ^ 256 || srcOff + sz ≥ 2 ^ 256 then
+    throw (Result.Failure Error.MemoryOOB)
+
+  let evm ← get
+  let padded := padRight evm.call.memory (dstOff + sz) 0
+  let slice := padded[srcOff:srcOff+sz]
+
+  let mut mem := padded
+  for (idx,val) in Array.zip (Fin.enum slice.size) slice.toArray do
+    let writeLoc := Fin.mk (dstOff + idx) (by sorry)
+    mem := Array.set mem writeLoc val
+  set $ { evm with call.memory := mem }
+
+
 def add (a : Word) (b : Word) : EVM Word :=
   pure $ a + b
 
+def sub (a : Word) (b : Word) : EVM Word :=
+  pure $ a - b
+
 def mul (a : Word) (b : Word) : EVM Word :=
   pure $ a * b
+
+def eq (a : Word) (b : Word) : EVM Word :=
+  pure $ if a == b then 1 else 0
+
+def lt (a : Word) (b : Word) : EVM Word :=
+  pure $ if a < b then 1 else 0
+
+def gt (a : Word) (b : Word) : EVM Word :=
+  pure $ if a > b then 1 else 0
+
+def le (a : Word) (b : Word) : EVM Word :=
+  pure $ if a ≤ b then 1 else 0
+
+def ge (a : Word) (b : Word) : EVM Word :=
+  pure $ if a ≥ b then 1 else 0
 
 def addmod (a : Word) (b : Word) (n : Word) : EVM Word :=
   pure (BitVec.ofNat 256 ((BitVec.toNat a + BitVec.toNat b) % BitVec.toNat n))
