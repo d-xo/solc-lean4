@@ -1,5 +1,9 @@
+import Lean
 import Init.Data.BitVec
+import Init.Data.Format
 import «SolcLean4».Yul
+
+open Lean Parser Command
 
 namespace Solidity
 
@@ -13,14 +17,68 @@ def runSol (s : Sol a) : Except Yul.Result a
   := Prod.fst $ Id.run (StateT.run (ExceptT.run s)) {}
 
 
+-- Syntax --
+
+
+declare_syntax_cat method_decl
+declare_syntax_cat type_signature
+declare_syntax_cat sol_command
+
+syntax "class" ident ":" ident ("[" ident,* "]")? "{" method_decl* "}" : sol_command
+syntax ident ":" type_signature ";" : method_decl
+syntax (ident+)→+ : type_spec
+
+instance : Coe (Syntax) (TSyntax `term) where
+  coe s := ⟨s⟩
+
+instance : Coe Syntax (TSyntax [`Lean.Parser.Command.structExplicitBinder, `Lean.Parser.Command.structImplicitBinder, `Lean.Parser.Command.structInstBinder, `Lean.Parser.Command.structSimpleBinder]) where
+  coe s := ⟨s⟩
+
+instance : Coe (Array Syntax) (TSyntaxArray [`Lean.Parser.Command.structExplicitBinder, `Lean.Parser.Command.structImplicitBinder, `Lean.Parser.Command.structInstBinder, `Lean.Parser.Command.structSimpleBinder]) where
+  coe s := ⟨s.data⟩
+
+macro_rules
+  | `(type_signature | $hds:ident+ $[-> $tp:ident+]* )
+      => `($hd $[ $tp ]*)
+
+  | `(method_decl | $nm:ident : $sig:type_signature ;)
+      => do
+        let ts ← expandMacros sig
+        `(structSimpleBinder | abs : $ts )
+
+  | `(sol_command | class $clsNm : $mainArg { $methods:method_decl* })
+      => do
+        let ms ← Array.mapM expandMacros methods
+        `(command |
+          class $clsNm ($mainArg : Type) where
+            mk::
+            $ms*
+         )
+
+syntax "solidity {" sol_command* "}" : command
+elab "solidity {" ss:sol_command* "}" : command
+  => do
+    _ ← Array.mapM Elab.Command.elabCommand ss
+    pure ()
+
+solidity {
+
+class Value : t {
+  abs : Word;
+  --rep : t -> Word;
+}
+
+}
+
+
 -- Type Classification --
 
 
 -- types that have a Yul.Word as their rep
 -- TODO: these fns should probably be monadic for consistency?
-class Value (t : Type) where
-  abs : Yul.Word → t
-  rep : t → Yul.Word
+--class Value (t : Type) where
+  --abs : Yul.Word → t
+  --rep : t → Yul.Word
 
 
 -- Booleans --
@@ -172,7 +230,7 @@ open Option
 inductive List (t : Type) where
 | Nil : List t
 | Cons (x : t) (xs : List t)
-open List
+--open List
 
 
 -- Containers --
@@ -202,7 +260,7 @@ open Add
 instance : Add (Word) where
   add l r := do
     let mut res := 0
-    assembly { res := mul(l, r) }
+    assembly { res := add(l, r) }
     return res
 
 class Mul (t : Type) where
@@ -527,8 +585,8 @@ def readSelector : Sol Bytes4 := do
 
 def callMethod (sel : Bytes4) : (methods : List Dispatch) → Sol Unit
 -- TODO: implement reverts
-| Nil => do assembly { return(0,0) }
-| Cons hd tl => match hd with
+| .Nil => do assembly { return(0,0) }
+| .Cons hd tl => match hd with
   | Dispatch.Dispatch cand fn => do
     if ← eq sel cand
     then fn
@@ -551,29 +609,41 @@ def mkContract (methods : List Dispatch) : Sol Unit := do
 -- Examples --
 
 def adder := mkContract $
-  Cons
+  .Cons
     (Dispatch.Dispatch
-      (Bytes4.abs 1997931255)
+      (Bytes4.abs 0x771602f7)
       (mkMethod (λ (args : Pair U256 U256) => add (Pair.fst args) (Pair.snd args)))
     )
-    Nil
+    .Nil
 
-def test : U256 :=
+def addCalldata (x : Nat) (y : Nat) : Vector Yul.Byte 68 :=
+  let xd := BitVec.ofNat 256 x
+  let yd := BitVec.ofNat 256 y
+  let sel := BitVec.ofNat 32 0x771602f7
+  BitVec.chunk 8 68 (BitVec.cast (by rfl) $ sel ++ xd ++ yd)
+
+def setCalldata (bs : Vector Yul.Byte sz) : Sol Unit := do
+  let vm ← get
+  set $ { vm with call.calldata := bs.toList.toArray }
+
+def test : Except String U256 :=
   let res := runSol $ do
-    let cd := BitVec.chunk 8 68 (BitVec.cast (by rfl) (BitVec.append (BitVec.ofNat 32 1997931255) (BitVec.append (BitVec.ofNat 256 1) (BitVec.ofNat 256 2))))
-    let vm ← get
-    set $ { vm with call.calldata := cd.toList.toArray }
+    setCalldata (addCalldata 10 5)
     adder
   match res with
   | Except.error res => match res with
-    | Yul.Result.Success vm => U256.abs $ BitVec.cast (by sorry) $ BitVec.join (Subarray.toVector vm.call.returndata[0:32])
-    | _ => 42
-  | _ => 69
+    | Yul.Result.Success vm =>
+        let rd := vm.call.returndata
+        let padded := padRight rd 32 1
+        let res := BitVec.cast (by sorry) $ BitVec.join (Subarray.toVector vm.call.returndata[0:32])
+        Except.ok $ U256.abs res
+    | r => Except.error ∘ Std.Format.pretty $ "execution finished with an error: " ++ (repr r)
+  | _ => Except.error "execution not finished"
 
 #eval test
 
 #eval runSol $ do
-  Add.add (U256.abs 2) (U256.abs 19)
+  Add.add (U256.abs 7) (U256.abs 2)
 
 
 end Solidity
