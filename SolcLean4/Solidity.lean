@@ -1,9 +1,10 @@
 import Lean
 import Init.Data.BitVec
+import Lean.Parser.Basic
 import Init.Data.Format
 import «SolcLean4».Yul
 
-open Lean Parser Command
+open Lean Parser Command Elab
 
 namespace Solidity
 
@@ -19,16 +20,18 @@ def runSol (s : Sol a) : Except Yul.Result a
 
 -- Syntax --
 
-
 declare_syntax_cat method_decl
 declare_syntax_cat type_signature
 declare_syntax_cat sol_command
 
 syntax "class" ident ":" ident ("[" ident,* "]")? "{" method_decl* "}" : sol_command
 syntax ident ":" type_signature ";" : method_decl
-syntax (ident+)→+ : type_spec
+syntax ident ("->" ident)* : type_signature
 
 instance : Coe (Syntax) (TSyntax `term) where
+  coe s := ⟨s⟩
+
+instance : Coe (TSyntax `type_signature) (TSyntax `term) where
   coe s := ⟨s⟩
 
 instance : Coe Syntax (TSyntax [`Lean.Parser.Command.structExplicitBinder, `Lean.Parser.Command.structImplicitBinder, `Lean.Parser.Command.structInstBinder, `Lean.Parser.Command.structSimpleBinder]) where
@@ -38,13 +41,12 @@ instance : Coe (Array Syntax) (TSyntaxArray [`Lean.Parser.Command.structExplicit
   coe s := ⟨s.data⟩
 
 macro_rules
-  | `(type_signature | $hds:ident+ $[-> $tp:ident+]* )
-      => `($hd $[ $tp ]*)
-
-  | `(method_decl | $nm:ident : $sig:type_signature ;)
+  | `(type_signature | $t:ident ) => `(term | $t)
+  | `(type_signature | $hd:ident -> $ret:ident ) => `(term | $hd -> $ret)
+  | `(method_decl | $n:ident : $sig:type_signature ;)
       => do
-        let ts ← expandMacros sig
-        `(structSimpleBinder | abs : $ts )
+        let decl ← `(optDeclSig | $n : $sig )
+        Lean.Parser.debugTraceStateFn (structSimpleBinder decl)
 
   | `(sol_command | class $clsNm : $mainArg { $methods:method_decl* })
       => do
@@ -64,8 +66,8 @@ elab "solidity {" ss:sol_command* "}" : command
 solidity {
 
 class Value : t {
-  abs : Word;
-  --rep : t -> Word;
+  abs : Word -> t;
+  rep : t -> Word;
 }
 
 }

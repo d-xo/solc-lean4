@@ -1,22 +1,29 @@
-import Mathlib.Data.Vector
-open Vector
-open Nat
+import Lean.Parser.Command
+import Lean
 
-def dfoldr {α : Type}
-           : {sz : ℕ}
-           → (tp : ℕ → Type)
-           → (step : (idx : ℕ) → α → tp idx → tp (idx + 1))
-           → (init : tp 0)
-           → Vector α sz
-           → tp sz
-| 0, _, _, base, Vector.nil => base
-| n + 1, p, step, base, v => step n (head v) (dfoldr p step base (tail v))
+open Lean Macro Elab
+
+--open Lean Parser Term
+--declare_syntax_cat type_spec
+
+---- Works :)
+--syntax (ident+),+ : type_spec
+
+----▶ 7:16-7:17: error:
+----unexpected token '→'; expected ':'
+--syntax (ident+)→+ : type_spec
+
+def f := Fin.last 5
+
+def r := Fin.mod (f + f) 4
+
+def ns := (5 + 5) % 4
+
+def hi : MacroM Lean.Syntax := do
+  `(Lean.Parser.Command.optDeclSig | a)
 
 
-def joinBytes (bytes : Vector (BitVec b) sz) : BitVec (sz * b) :=
-  have cast_thm {i} : b + i * b = (i + 1) * b := by rw [add_comm, mul_comm, ←mul_succ, mul_comm]
-  dfoldr
-    (λ i => BitVec (i * b))
-    (λ i val acc => BitVec.cast cast_thm (BitVec.append val acc))
-    (BitVec.cast (by simp) BitVec.nil)
-    bytes
+#check hi
+#eval f
+#eval r
+#eval ns
