@@ -44,9 +44,7 @@ macro_rules
   | `(type_signature | $t:ident ) => `(term | $t)
   | `(type_signature | $hd:ident -> $ret:ident ) => `(term | $hd -> $ret)
   | `(method_decl | $n:ident : $sig:type_signature ;)
-      => do
-        let decl ← `(optDeclSig | $n : $sig )
-        Lean.Parser.debugTraceStateFn (structSimpleBinder decl)
+      => `(structSimpleBinder | $n : $sig )
 
   | `(sol_command | class $clsNm : $mainArg { $methods:method_decl* })
       => do
@@ -65,9 +63,9 @@ elab "solidity {" ss:sol_command* "}" : command
 
 solidity {
 
-class Value : t {
+class Value0 : t {
   abs : Word -> t;
-  rep : t -> Word;
+  --rep : t -> Word;
 }
 
 }
@@ -78,9 +76,9 @@ class Value : t {
 
 -- types that have a Yul.Word as their rep
 -- TODO: these fns should probably be monadic for consistency?
---class Value (t : Type) where
-  --abs : Yul.Word → t
-  --rep : t → Yul.Word
+class Value (t : Type) where
+  abs : Yul.Word → t
+  rep : t → Yul.Word
 
 
 -- Booleans --
